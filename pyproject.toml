@@ -1,0 +1,32 @@
+[project]
+name = "spotify-playlist-pruner"
+version = "0.1.0"
+description = "Safely back up and prune Spotify playlists by date"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "James DeLosh" }]
+keywords = ["spotify", "playlist", "backup", "csv"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.scripts]
+playlist-pruner = "playlist_pruner:main"
+
+[project.urls]
+Repository = "https://github.com/jtdelosh-ops/playlist-pruner"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["playlist_pruner"]
