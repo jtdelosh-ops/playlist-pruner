@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Back up Spotify playlists and prune entries added before a cutoff date."""
+"""Back up Spotify playlists and prune entries added before a cutoff date.
+
+The program is intentionally read-only by default. A user must pass
+``--confirm`` and then type a matching confirmation phrase before any playlist
+items are removed.
+"""
 
 from __future__ import annotations
 
@@ -38,6 +43,13 @@ class PrunerError(RuntimeError):
 
 @dataclass
 class PlaylistEntry:
+    """A normalized playlist row used by the CSV and pruning code.
+
+    Spotify may return tracks, episodes, local files, or unavailable items.
+    Normalizing them here lets the rest of the program handle one predictable
+    shape instead of repeatedly inspecting Spotify's nested JSON response.
+    """
+
     playlist_id: str
     playlist_name: str
     position: int
@@ -52,6 +64,8 @@ class PlaylistEntry:
 
 
 class CallbackHandler(BaseHTTPRequestHandler):
+    """Receive Spotify's one-time OAuth response on this computer."""
+
     result: dict[str, str] = {}
 
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
@@ -81,6 +95,8 @@ def base64url(raw: bytes) -> str:
 
 
 def load_dotenv(path: Path) -> None:
+    """Load simple KEY=VALUE settings without requiring a third-party package."""
+
     if not path.exists():
         return
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -95,6 +111,8 @@ def load_dotenv(path: Path) -> None:
 
 
 def parse_playlist_id(value: str) -> str:
+    """Accept a Spotify URL, URI, or raw ID and return the playlist ID."""
+
     value = value.strip()
     if not value:
         raise argparse.ArgumentTypeError("playlist value cannot be empty")
@@ -115,6 +133,8 @@ def parse_playlist_id(value: str) -> str:
 
 
 def parse_cutoff(value: str) -> datetime:
+    """Convert YYYY-MM-DD to midnight UTC for consistent comparisons."""
+
     try:
         parsed = date.fromisoformat(value)
     except ValueError as exc:
@@ -137,13 +157,22 @@ def chunks(values: list[str], size: int) -> Iterable[list[str]]:
 
 
 class SpotifyClient:
+    """Small Spotify Web API client with authentication and retry handling."""
+
     def __init__(self, client_id: str):
         self.client_id = client_id
         self.access_token = self.authorize()
 
     def authorize(self) -> str:
+        """Authorize with PKCE and return a short-lived Spotify access token."""
+
+        # PKCE proves that the program exchanging the authorization code is the
+        # same program that started login. It avoids storing a Client Secret.
         verifier = base64url(secrets.token_bytes(64))
         challenge = base64url(hashlib.sha256(verifier.encode()).digest())
+
+        # Spotify sends this value back unchanged. Comparing it below protects
+        # the local callback from accepting a response started by someone else.
         state = secrets.token_urlsafe(24)
         params = {
             "client_id": self.client_id,
@@ -156,6 +185,8 @@ class SpotifyClient:
         }
         url = AUTHORIZE_URL + "?" + urllib.parse.urlencode(params)
         CallbackHandler.result = {}
+        # The local server receives exactly one browser redirect from Spotify.
+        # 127.0.0.1 never leaves this computer.
         try:
             server = HTTPServer(("127.0.0.1", 8888), CallbackHandler)
         except OSError as exc:
@@ -176,6 +207,8 @@ class SpotifyClient:
         code = result.get("code")
         if not code:
             raise PrunerError("Spotify did not return an authorization code")
+        # Exchange the temporary authorization code for the access token used
+        # in subsequent API requests.
         payload = urllib.parse.urlencode(
             {
                 "client_id": self.client_id,
@@ -206,6 +239,8 @@ class SpotifyClient:
         query: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Make an authenticated API request and retry temporary failures."""
+
         url = path_or_url if path_or_url.startswith("http") else API_BASE + path_or_url
         if query:
             url += ("&" if "?" in url else "?") + urllib.parse.urlencode(query)
@@ -221,11 +256,14 @@ class SpotifyClient:
                     return json.loads(raw) if raw else {}
             except urllib.error.HTTPError as exc:
                 if exc.code == 429 and attempt < 4:
+                    # Spotify tells clients how long to wait after rate limits.
                     delay = max(1, int(exc.headers.get("Retry-After", "1")))
                     print(f"Spotify rate limit reached; retrying in {delay}s...")
                     time.sleep(delay)
                     continue
                 if exc.code >= 500 and attempt < 4:
+                    # Server errors are often temporary, so wait progressively
+                    # longer before each retry (1, 2, 4, then 8 seconds).
                     time.sleep(2**attempt)
                     continue
                 raise PrunerError(f"Spotify API {method} {url} failed: {read_http_error(exc)}") from exc
@@ -246,12 +284,16 @@ def read_http_error(exc: urllib.error.HTTPError) -> str:
 
 
 def get_playlist(client: SpotifyClient, playlist_id: str) -> tuple[str, str, list[PlaylistEntry]]:
+    """Download and normalize every item in one playlist."""
+
     metadata = client.request("GET", f"/playlists/{playlist_id}")
     name = metadata.get("name") or playlist_id
     snapshot_id = metadata.get("snapshot_id") or ""
     entries: list[PlaylistEntry] = []
     url: str | None = f"{API_BASE}/playlists/{playlist_id}/items?limit=50&additional_types=track,episode"
     position = 0
+    # Spotify returns no more than 50 playlist items per page. Its ``next`` URL
+    # points to the following page and becomes null after the final page.
     while url:
         page = client.request("GET", url)
         for wrapped in page.get("items", []):
@@ -294,6 +336,8 @@ CSV_FIELDS = [
 
 
 def write_csv(path: Path, entries: Iterable[PlaylistEntry]) -> None:
+    """Write playlist rows as a UTF-8 CSV that also opens cleanly in Excel."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
@@ -305,9 +349,19 @@ def write_csv(path: Path, entries: Iterable[PlaylistEntry]) -> None:
 def classify_entries(
     entries: list[PlaylistEntry], cutoff: datetime
 ) -> tuple[list[PlaylistEntry], list[PlaylistEntry], list[PlaylistEntry]]:
+    """Separate removable, ambiguous duplicate, and unsafe-to-remove entries.
+
+    Spotify's removal endpoint works by URI rather than by exact playlist row.
+    Removing a URI can therefore remove duplicate occurrences. If a URI exists
+    both before and after the cutoff, the older occurrence is marked ambiguous
+    and skipped so the newer occurrence is not removed accidentally.
+    """
+
     by_uri: dict[str, list[PlaylistEntry]] = {}
     unknown: list[PlaylistEntry] = []
     for entry in entries:
+        # Local files have no removable Spotify URI. Missing or malformed dates
+        # cannot be compared safely, so those entries are also left untouched.
         if entry.is_local or not entry.uri or parse_added_at(entry.added_at) is None:
             unknown.append(entry)
         else:
@@ -326,6 +380,8 @@ def classify_entries(
 
 
 def collect_playlist_values(args: argparse.Namespace) -> list[str]:
+    """Collect, validate, and de-duplicate playlist inputs from both sources."""
+
     values = list(args.playlist or [])
     if args.playlist_file:
         try:
@@ -364,6 +420,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run backup, preview, and optional removal in that safety-first order."""
+
     load_dotenv(Path(".env"))
     args = build_parser().parse_args(argv)
     client_id = args.client_id or os.environ.get("SPOTIFY_CLIENT_ID")
@@ -392,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         if len(removable) > 20:
             print(f"  ...and {len(removable) - 20} more (see CSV)")
 
+    # Backups are always written before the program considers changing Spotify.
     backup_path = output_dir / f"playlist-backup-{timestamp}.csv"
     candidate_path = output_dir / f"prune-candidates-{timestamp}.csv"
     write_csv(backup_path, all_entries)
@@ -402,6 +461,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Cutoff: items added before {cutoff.date().isoformat()} (UTC)")
     print(f"Total eligible occurrences: {len(candidates)}")
 
+    # A normal invocation stops here. Merely running the program can never
+    # remove playlist items unless --confirm was supplied explicitly.
     if not args.confirm:
         print("\nDRY RUN ONLY — no Spotify playlists were changed.")
         print("Review the CSV files, then rerun with --confirm to enable removal.")
@@ -409,6 +470,8 @@ def main(argv: list[str] | None = None) -> int:
     if not candidates:
         print("\nNothing to remove.")
         return 0
+    # The typed count makes an accidental Enter or stale command insufficient
+    # to authorize a destructive operation.
     answer = input(f'\nType DELETE {len(candidates)} to permanently remove these entries: ').strip()
     if answer != f"DELETE {len(candidates)}":
         print("Confirmation did not match. No Spotify playlists were changed.")
@@ -416,11 +479,15 @@ def main(argv: list[str] | None = None) -> int:
 
     removed: list[PlaylistEntry] = []
     for playlist_id, name, snapshot_id, entries in plans:
+        # De-duplicate URIs because Spotify removes every matching occurrence.
         uris = list(dict.fromkeys(entry.uri for entry in entries if entry.uri))
         current_snapshot = snapshot_id
+        # Spotify accepts at most 100 playlist items in one removal request.
         for batch in chunks(uris, 100):
             body: dict[str, Any] = {"items": [{"uri": uri} for uri in batch]}
             if current_snapshot:
+                # A snapshot anchors the request to the playlist version that
+                # we inspected, even if another edit happened afterward.
                 body["snapshot_id"] = current_snapshot
             response = client.request("DELETE", f"/playlists/{playlist_id}/items", body=body)
             current_snapshot = response.get("snapshot_id", current_snapshot)
@@ -442,3 +509,4 @@ if __name__ == "__main__":
     except PrunerError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1)
+
