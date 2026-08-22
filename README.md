@@ -8,6 +8,12 @@ added before a cutoff date. It is read-only unless you explicitly pass
 
 It downloads playlist metadata only—not music or audio.
 
+> [!NOTE]
+> Playlist Pruner is an independent project and is not affiliated with,
+> endorsed by, or sponsored by Spotify. Use of the Spotify Web API is subject
+> to Spotify's [Developer Terms](https://developer.spotify.com/terms) and
+> [Developer Policy](https://developer.spotify.com/policy).
+
 ## Requirements
 
 - Python 3.10 or newer
@@ -112,3 +118,4 @@ python -m unittest -v
 ## License
 
 MIT
+
